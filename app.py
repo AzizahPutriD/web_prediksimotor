@@ -1,12 +1,35 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from pmdarima import auto_arima
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
 import io
 import sqlite3
+from statsmodels.tsa.arima.model import ARIMA
+import warnings
+
+# ===== ARIMA GRID SEARCH FUNCTION =====
+def find_best_arima_model(ts_log, max_p=3, max_d=2, max_q=3):
+    warnings.filterwarnings("ignore")
+    best_aic = float("inf")
+    best_order = None
+    best_model = None
+
+    for p in range(max_p + 1):
+        for d in range(max_d + 1):
+            for q in range(max_q + 1):
+                try:
+                    model = ARIMA(ts_log, order=(p, d, q)).fit()
+                    aic = model.aic
+                    if aic < best_aic:
+                        best_aic = aic
+                        best_order = (p, d, q)
+                        best_model = model
+                except:
+                    continue
+
+    return best_model, best_order
 
 # ===== DATABASE CONFIGURATION =====
 def init_db():
@@ -21,8 +44,7 @@ def init_db():
     ''')
     c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", "12345", "admin"))
     c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", ("viewer", "viewer", "viewer"))
-    
-    # Tabel untuk menyimpan hasil prediksi
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +85,6 @@ def display_predictions():
 # ===== LOGIN PAGE =====
 def login():
     st.markdown("<h1 style='text-align: center;'>📈 Sistem Prediksi Penjualan Sepeda Motor Honda</h1>", unsafe_allow_html=True)
-    
     with st.form("login_form"):
         st.markdown("<h2 style='text-align: center;'>🔐 Login</h2>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center;'>Silakan masukkan username & password untuk mengakses aplikasi.</p>", unsafe_allow_html=True)
@@ -184,9 +205,9 @@ def main():
                 df_scaled = pd.DataFrame(jumlah_scaled, index=df_bulanan.index, columns=['jumlah'])
                 df_log = np.log1p(df_scaled)
 
-                model = auto_arima(df_log, seasonal=False, stepwise=True, suppress_warnings=True, error_action='ignore')
-                forecast_log = model.predict(n_periods=periode)
-                forecast_scaled = np.expm1(forecast_log).reshape(-1, 1)
+                model, order = find_best_arima_model(df_log)
+                forecast_log = model.forecast(steps=periode)
+                forecast_scaled = np.expm1(forecast_log.to_numpy().reshape(-1, 1))
                 forecast = scaler.inverse_transform(forecast_scaled).flatten()
 
                 future_dates = pd.date_range(df_bulanan.index[-1] + pd.offsets.MonthBegin(1), periods=periode, freq='MS')
@@ -209,17 +230,15 @@ def main():
                 plt.tight_layout()
                 st.pyplot(fig)
 
-                # Simpan hasil prediksi ke database
                 save_predictions(df_prediksi)
 
-                # Evaluasi model
                 n_test = min(12, len(df_bulanan) // 3)
                 if n_test >= 3:
                     train_log = df_log.iloc[:-n_test]
                     test_asli = df_bulanan.iloc[-n_test:]
-                    model_eval = auto_arima(train_log, seasonal=False, stepwise=True, suppress_warnings=True, error_action='ignore')
-                    pred_log_eval = model_eval.predict(n_periods=n_test)
-                    pred_scaled_eval = np.expm1(pred_log_eval).reshape(-1, 1)
+                    model_eval, _ = find_best_arima_model(train_log)
+                    pred_log_eval = model_eval.forecast(steps=n_test)
+                    pred_scaled_eval = np.expm1(pred_log_eval.to_numpy().reshape(-1, 1))
                     pred_eval = scaler.inverse_transform(pred_scaled_eval).flatten()
                     mae = mean_absolute_error(test_asli['jumlah'], pred_eval)
                     mape = mean_absolute_percentage_error(test_asli['jumlah'], pred_eval) * 100
@@ -234,16 +253,7 @@ def main():
 
             st.subheader("📋 Tabel Hasil Prediksi")
             predictions_df = all_predictions.sort_values(['Tipe Motor', 'Bulan']).reset_index(drop=True)
-            for index, row in predictions_df.iterrows():
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col1:
-                    st.write(f"{row['Tipe Motor']} - {row['Bulan'].strftime('%Y-%m')} - {row['Prediksi Penjualan']}")
-                with col2:
-                    if st.button("Hapus", key=row['Bulan']):
-                        delete_prediction(row['id'])  # Menghapus prediksi dari database
-                        st.success("Prediksi berhasil dihapus.")
-                with col3:
-                    st.write("")  # Tempat untuk kolom kosong
+            st.dataframe(predictions_df[['Tipe Motor', 'Bulan', 'Prediksi Penjualan']])
 
             st.subheader("🧪 Evaluasi Akurasi Model")
             for tipe_motor, mae, mape in evaluation_results:
@@ -267,22 +277,18 @@ def main():
     elif st.session_state.role == 'viewer':
         st.subheader("📋 Hasil Prediksi Sebelumnya")
         past_predictions = display_predictions()
-
-        # Mengambil tahun dari kolom bulan
         past_predictions['tahun'] = pd.to_datetime(past_predictions['bulan']).dt.year
-
-        # Mengelompokkan hasil berdasarkan tahun
         grouped_predictions = past_predictions.groupby('tahun')
 
         for tahun, group in grouped_predictions:
             st.subheader(f"Hasil Prediksi untuk Tahun: {tahun}")
             st.dataframe(group[['tipe_motor', 'bulan', 'prediksi_penjualan']])
-            
+
             if st.button(f"Hapus Semua untuk {tahun}"):
                 for index, row in group.iterrows():
-                    delete_prediction(row['id'])  # Menghapus semua prediksi untuk tahun tersebut
+                    delete_prediction(row['id'])
                 st.success(f"Semua prediksi untuk tahun {tahun} berhasil dihapus.")
-                    
+
 # ===== START APP =====
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
