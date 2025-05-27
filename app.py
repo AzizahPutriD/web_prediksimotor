@@ -36,16 +36,6 @@ def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password TEXT,
-            role TEXT
-        )
-    ''')
-    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", "12345", "admin"))
-    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", ("viewer", "viewer", "viewer"))
-
-    c.execute('''
         CREATE TABLE IF NOT EXISTS predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tipe_motor TEXT,
@@ -94,14 +84,17 @@ def login():
         submitted = st.form_submit_button("Login")
 
         if submitted:
-            conn = sqlite3.connect('users.db')
-            c = conn.cursor()
-            c.execute("SELECT role FROM users WHERE username=? AND password=?", (username, password))
-            result = c.fetchone()
-            conn.close()
-            if result:
+            admin_username = st.secrets["login"]["admin_username"]
+            admin_password = st.secrets["login"]["admin_password"]
+            viewer_username = st.secrets["login"]["viewer_username"]
+            viewer_password = st.secrets["login"]["viewer_password"]
+            
+            if username == admin_username and password == admin_password:
                 st.session_state.logged_in = True
-                st.session_state.role = result[0]
+                st.session_state.role = "admin"
+            elif username == viewer_username and password == viewer_password:
+                st.session_state.logged_in = True
+                st.session_state.role = "viewer"
             else:
                 st.error("❌ Username atau password salah.")
 
