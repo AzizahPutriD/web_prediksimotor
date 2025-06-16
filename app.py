@@ -146,13 +146,13 @@ def main():
             df['jumlah'] = pd.to_numeric(df['jumlah'], errors='coerce')
              # Mengatasi missing values
              # Menggunakan median untuk mengisi missing values
-            df['jumlah'].fillna(df['jumlah'].median(), inplace=True)
+            # df['jumlah'].fillna(df['jumlah'].median(), inplace=True)
 
             # Alternatif: menggunakan forward fill
             # df['jumlah'].fillna(method='ffill', inplace=True)
 
             # Alternatif: menggunakan interpolasi
-            # df['jumlah'].interpolate(method='linear', inplace=True)
+            df['jumlah'].interpolate(method='linear', inplace=True)
             if df['jumlah'].isnull().any():
                 st.error("Kolom 'jumlah' harus berisi angka.")
                 return
