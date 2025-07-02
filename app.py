@@ -1,40 +1,60 @@
-import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
-from sklearn.preprocessing import MinMaxScaler
-import numpy as np
-import io
-import sqlite3
-from statsmodels.tsa.arima.model import ARIMA
-import warnings
+import streamlit as st  # Framework web app berbasis Python
+import pandas as pd  # Untuk manipulasi data
+import matplotlib.pyplot as plt  # Visualisasi grafik
+from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error  # Evaluasi model prediksi
+from sklearn.preprocessing import MinMaxScaler  # Normalisasi data
+import numpy as np  # Perhitungan numerik
+import io  # Operasi file stream
+import sqlite3  # Database SQLite lokal
+from statsmodels.tsa.arima.model import ARIMA  # Library ARIMA
+import warnings  # Menonaktifkan warning agar output bersih
 
 # ===== ARIMA GRID SEARCH FUNCTION =====
+# Fungsi untuk mencari model ARIMA terbaik berdasarkan nilai AIC terkecil
+# ts_log: data deret waktu yang telah ditransformasi log
+# max_p, max_d, max_q: batas maksimum untuk parameter p (AR), d (differencing), dan q (MA)
 def find_best_arima_model(ts_log, max_p=3, max_d=2, max_q=3):
+    # Menonaktifkan peringatan agar output lebih bersih
     warnings.filterwarnings("ignore")
+    # Inisialisasi nilai AIC terbaik dengan nilai tak hingga
     best_aic = float("inf")
-    best_order = None
-    best_model = None
+    best_order = None   # Menyimpan kombinasi (p,d,q) terbaik 
+    best_model = None   # Menyimpan model ARIMA terbaik
 
+    # Melakukan grid search untuk semua kombinasi parameter p, d, q
     for p in range(max_p + 1):
         for d in range(max_d + 1):
             for q in range(max_q + 1):
                 try:
+                    # Membangun dan melatih model ARIMA dengan parameter (p,d,q)
                     model = ARIMA(ts_log, order=(p, d, q)).fit()
+                    # Mengambil nilai AIC dari model yang dilatih
                     aic = model.aic
+                    # Jika AIC lebih kecil dari yang terbaik sebelumnya, simpan model dan parameternya
                     if aic < best_aic:
                         best_aic = aic
                         best_order = (p, d, q)
                         best_model = model
                 except:
+                    # Abaikan kombinasi parameter yang gagal atau error
                     continue
-
+    # Mengembalikan model ARIMA terbaik dan kombinasi parameter (p,d,q) terbaik
     return best_model, best_order
 
 # ===== DATABASE CONFIGURATION =====
 def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT,
+            role TEXT
+        )
+    ''')
+    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", "12345", "admin"))
+    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", ("viewer", "viewer", "viewer"))
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,17 +104,14 @@ def login():
         submitted = st.form_submit_button("Login")
 
         if submitted:
-            admin_username = st.secrets["login"]["admin_username"]
-            admin_password = st.secrets["login"]["admin_password"]
-            viewer_username = st.secrets["login"]["viewer_username"]
-            viewer_password = st.secrets["login"]["viewer_password"]
-            
-            if username == admin_username and password == admin_password:
+            conn = sqlite3.connect('users.db')
+            c = conn.cursor()
+            c.execute("SELECT role FROM users WHERE username=? AND password=?", (username, password))
+            result = c.fetchone()
+            conn.close()
+            if result:
                 st.session_state.logged_in = True
-                st.session_state.role = "admin"
-            elif username == viewer_username and password == viewer_password:
-                st.session_state.logged_in = True
-                st.session_state.role = "viewer"
+                st.session_state.role = result[0]
             else:
                 st.error("❌ Username atau password salah.")
 
@@ -207,9 +224,16 @@ def main():
                 df_scaled = pd.DataFrame(jumlah_scaled, index=df_bulanan.index, columns=['jumlah'])
                 df_log = np.log1p(df_scaled)
 
+                # Menjalankan fungsi pencarian model ARIMA terbaik menggunakan data log-transformasi
+                # Mengembalikan model ARIMA terbaik dan parameter (p,d,q) terbaiknya
                 model, order = find_best_arima_model(df_log)
+                # Menggunakan model terbaik untuk melakukan prediksi log nilai pada sejumlah 'periode' ke depan
                 forecast_log = model.forecast(steps=periode)
+                # Mengubah hasil prediksi log ke bentuk skala aslinya dengan fungsi eksponensial invers dari log1p (yaitu expm1)
+                # forecast_log diubah menjadi array NumPy 2D terlebih dahulu agar sesuai dengan format input scaler
                 forecast_scaled = np.expm1(forecast_log.to_numpy().reshape(-1, 1))
+                # Melakukan inverse transform pada hasil forecast agar kembali ke skala asli (sebelum normalisasi)
+                # Hasil akhirnya adalah array 1D berisi prediksi penjualan dalam skala nyata
                 forecast = scaler.inverse_transform(forecast_scaled).flatten()
 
                 future_dates = pd.date_range(df_bulanan.index[-1] + pd.offsets.MonthBegin(1), periods=periode, freq='MS')
@@ -238,13 +262,44 @@ def main():
                 if n_test >= 3:
                     train_log = df_log.iloc[:-n_test]
                     test_asli = df_bulanan.iloc[-n_test:]
+
+                    # Melatih model ARIMA terbaik berdasarkan data pelatihan (train_log)
+                    # Fungsi ini akan mencari kombinasi parameter (p,d,q) terbaik berdasarkan nilai AIC terendah
                     model_eval, _ = find_best_arima_model(train_log)
+                    # Melakukan prediksi (forecast) sebanyak n_test langkah ke depan menggunakan model yang telah dilatih
+                    # Output masih dalam bentuk log, karena input ke model sebelumnya adalah data yang sudah ditransformasikan dengan log
                     pred_log_eval = model_eval.forecast(steps=n_test)
+
                     pred_scaled_eval = np.expm1(pred_log_eval.to_numpy().reshape(-1, 1))
                     pred_eval = scaler.inverse_transform(pred_scaled_eval).flatten()
+
+                    # Menghitung Mean Absolute Error (MAE) antara data aktual dan hasil prediksi evaluasi.
+                    # MAE menunjukkan rata-rata selisih absolut antara nilai aktual dan prediksi.
                     mae = mean_absolute_error(test_asli['jumlah'], pred_eval)
+                    # Menghitung Mean Absolute Percentage Error (MAPE) antara data aktual dan hasil prediksi evaluasi.
+                    # MAPE menunjukkan seberapa besar persentase kesalahan prediksi terhadap data aktual.
                     mape = mean_absolute_percentage_error(test_asli['jumlah'], pred_eval) * 100
+                    
                     evaluation_results.append((tipe_motor, mae, mape))
+                    # Tambahkan grafik perbandingan aktual vs prediksi (hanya jika data aktual tersedia)
+                    df_eval_plot = pd.DataFrame({
+                         'Bulan': test_asli.index,
+                         'Aktual': test_asli['jumlah'].values,
+                         'Prediksi': pred_eval
+                    })
+                    
+                    fig_eval, ax_eval = plt.subplots()
+                    ax_eval.plot(df_eval_plot['Bulan'], df_eval_plot['Aktual'], label='Aktual', marker='o')
+                    ax_eval.plot(df_eval_plot['Bulan'], df_eval_plot['Prediksi'], label='Prediksi', marker='x', linestyle='--')
+                    ax_eval.set_title(f'Perbandingan Aktual vs Prediksi - {tipe_motor} (Evaluasi)')
+                    ax_eval.set_xlabel('Bulan')
+                    ax_eval.set_ylabel('Jumlah Penjualan')
+                    ax_eval.legend()
+                    ax_eval.grid(True, linestyle='--', alpha=0.5)
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    st.pyplot(fig_eval)
+
                 else:
                     evaluation_results.append((tipe_motor, None, None))
                     st.info(f"Data historis '{tipe_motor}' terlalu sedikit untuk evaluasi.")
